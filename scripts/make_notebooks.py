@@ -138,9 +138,18 @@ config
 """
         ),
         code_cell(
+            """sample_prompts = [
+    "### Instruction:\\nSummarize QLoRA in plain language for a student.\\n\\n### Response:\\n",
+    "### Instruction:\\nWhat is the purpose of NF4 quantization in QLoRA?\\n\\n### Response:\\n",
+    "### Instruction:\\nExplain what a paged optimizer is and why it helps memory usage.\\n\\n### Response:\\n",
+]
+sample_prompts
+"""
+        ),
+        code_cell(
             """from qlora_scratch.train import run_experiment
 
-metrics = run_experiment(PROJECT_ROOT / "data", config)
+metrics = run_experiment(PROJECT_ROOT / "data", config, sample_prompts=sample_prompts)
 metrics
 """
         ),
@@ -152,10 +161,14 @@ print("Tokens/sec:", metrics["tokens_per_second"])
 """
         ),
         code_cell(
-            """print("=== PRE ===")
-print(metrics["pre_sample"])
-print("\\n=== POST ===")
-print(metrics["post_sample"])
+            """for idx, (pre, post) in enumerate(zip(metrics["pre_samples"], metrics["post_samples"]), start=1):
+    print(f"=== PROMPT {idx} ===")
+    print(pre["prompt"])
+    print("\\n--- PRE-FINETUNE ---")
+    print(pre["response"])
+    print("\\n--- POST-FINETUNE ---")
+    print(post["response"])
+    print("\\n")
 """
         ),
     ]
@@ -176,7 +189,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
         ),
         code_cell(INSTALL_CELL),
         code_cell(
-            """from qlora_scratch.analysis import load_metrics, metrics_to_frame, plot_training_curve
+            """from qlora_scratch.analysis import (
+    build_instruction_tuning_table,
+    load_metrics,
+    metrics_to_frame,
+    plot_system_metrics,
+    plot_training_curve,
+)
 
 metrics = load_metrics(PROJECT_ROOT / "results" / "scratch_qlora")
 summary = metrics_to_frame(metrics)
@@ -189,10 +208,26 @@ fig
 """
         ),
         code_cell(
-            """print("=== PRE-FINETUNE SAMPLE ===")
-print(metrics["pre_sample"])
-print("\\n=== POST-FINETUNE SAMPLE ===")
-print(metrics["post_sample"])
+            """fig = plot_system_metrics(metrics)
+fig
+"""
+        ),
+        code_cell(
+            """instruction_table = build_instruction_tuning_table(metrics)
+instruction_table
+"""
+        ),
+        code_cell(
+            """for row in instruction_table.to_dict(orient="records"):
+    print(f"=== PROMPT {row['prompt_id']} ===")
+    print(row["prompt"])
+    print("\\n--- PRE-FINETUNE ---")
+    print(row["pre_response"])
+    print("\\n--- POST-FINETUNE ---")
+    print(row["post_response"])
+    print("\\nLatency (s):", row["pre_latency_s"], "->", row["post_latency_s"])
+    print("Tokens/sec:", row["pre_tokens_per_second"], "->", row["post_tokens_per_second"])
+    print("\\n")
 """
         ),
     ]

@@ -2,10 +2,11 @@ from .data import DEFAULT_PROMPT_TEMPLATE, build_oasst1_splits, load_json_splits
 from .lora import LoRAConfig, QuantizedLoRALinear, prepare_model_for_kbit_training
 from .paged_optim import PagedAdamW32bit
 from .quantization import NF4_CODEBOOK, NF4Tensor, quantize_nf4
-from .train import ExperimentConfig, run_experiment
+from .train import DEFAULT_INSTRUCTION_PROMPTS, ExperimentConfig, run_experiment
 
 __all__ = [
     "DEFAULT_PROMPT_TEMPLATE",
+    "DEFAULT_INSTRUCTION_PROMPTS",
     "NF4_CODEBOOK",
     "NF4Tensor",
     "LoRAConfig",

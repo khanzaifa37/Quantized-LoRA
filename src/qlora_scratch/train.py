@@ -16,6 +16,12 @@ from .data import load_json_splits
 from .lora import LoRAConfig, count_trainable_parameters, prepare_model_for_kbit_training
 from .paged_optim import PagedAdamW32bit
 
+DEFAULT_INSTRUCTION_PROMPTS = [
+    "### Instruction:\nSummarize the idea of instruction tuning in two short bullet points.\n\n### Response:\n",
+    "### Instruction:\nExplain why low-rank adapters can reduce training cost.\n\n### Response:\n",
+    "### Instruction:\nWrite a short answer describing what NF4 quantization does.\n\n### Response:\n",
+]
+
 
 @dataclass
 class ExperimentConfig:
@@ -107,23 +113,44 @@ def evaluate(model, dataloader, device: torch.device) -> dict:
 def generate_text(model, tokenizer, prompt: str, device: torch.device, max_new_tokens: int = 80) -> str:
     model.eval()
     batch = tokenizer(prompt, return_tensors="pt").to(device)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    start = time.perf_counter()
     generated = model.generate(
         **batch,
         max_new_tokens=max_new_tokens,
         do_sample=False,
         pad_token_id=tokenizer.eos_token_id,
     )
-    return tokenizer.decode(generated[0], skip_special_tokens=True)
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    latency_s = time.perf_counter() - start
+    text = tokenizer.decode(generated[0], skip_special_tokens=True)
+    prompt_tokens = int(batch["input_ids"].shape[-1])
+    total_tokens = int(generated.shape[-1])
+    new_tokens = max(total_tokens - prompt_tokens, 0)
+    return {
+        "prompt": prompt,
+        "response": text,
+        "latency_s": latency_s,
+        "generated_tokens": new_tokens,
+        "tokens_per_second": new_tokens / latency_s if latency_s > 0 else 0.0,
+    }
+
+
+def collect_generation_samples(model, tokenizer, prompts: list[str], device: torch.device) -> list[dict]:
+    return [generate_text(model, tokenizer, prompt, device) for prompt in prompts]
 
 
 def run_experiment(
     data_dir: str | Path,
     config: ExperimentConfig | None = None,
     *,
-    sample_prompt: str = "### Instruction:\nExplain what QLoRA is in two short paragraphs.\n\n### Response:\n",
+    sample_prompts: list[str] | None = None,
 ) -> dict:
     config = config or ExperimentConfig()
     set_seed(config.seed)
+    sample_prompts = sample_prompts or DEFAULT_INSTRUCTION_PROMPTS
 
     output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -164,6 +191,7 @@ def run_experiment(
         collate_fn=default_data_collator,
     )
 
+    num_training_steps = math.ceil(len(train_loader) / config.gradient_accumulation_steps) * config.epochs
     optimizer = PagedAdamW32bit(
         (p for p in model.parameters() if p.requires_grad),
         lr=config.learning_rate,
@@ -171,12 +199,13 @@ def run_experiment(
         page_size=config.optimizer_page_size,
     )
 
-    pre_text = generate_text(model, tokenizer, sample_prompt, device)
+    pre_samples = collect_generation_samples(model, tokenizer, sample_prompts, device)
 
     train_losses = []
     start_time = time.time()
     total_tokens = 0
     global_step = 0
+    step_durations = []
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
@@ -187,6 +216,7 @@ def run_experiment(
         optimizer.zero_grad()
 
         for step, batch in enumerate(progress, start=1):
+            step_start = time.perf_counter()
             batch = {k: v.to(device) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss / config.gradient_accumulation_steps
@@ -199,29 +229,56 @@ def run_experiment(
                 optimizer.step()
                 optimizer.zero_grad()
                 global_step += 1
+                step_durations.append(time.perf_counter() - step_start)
 
             progress.set_postfix(loss=f"{train_losses[-1]:.4f}")
 
     train_time = time.time() - start_time
     eval_metrics = evaluate(model, val_loader, device)
-    post_text = generate_text(model, tokenizer, sample_prompt, device)
+    post_samples = collect_generation_samples(model, tokenizer, sample_prompts, device)
+
+    generation_latency_mean = (
+        sum(sample["latency_s"] for sample in post_samples) / len(post_samples) if post_samples else 0.0
+    )
+    generation_tps_mean = (
+        sum(sample["tokens_per_second"] for sample in post_samples) / len(post_samples) if post_samples else 0.0
+    )
+    optimizer_step_latency_mean = sum(step_durations) / len(step_durations) if step_durations else 0.0
 
     metrics = {
         "config": asdict(config),
+        "system": {
+            "device": str(device),
+            "cuda_available": torch.cuda.is_available(),
+            "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+            "gpu_total_memory_gb": (
+                torch.cuda.get_device_properties(device).total_memory / 1e9 if torch.cuda.is_available() else 0.0
+            ),
+        },
         "trainable_params": trainable,
         "total_params": total,
         "trainable_percent": 100.0 * trainable / total,
+        "num_training_steps": num_training_steps,
+        "completed_optimizer_steps": global_step,
         "train_loss_last": train_losses[-1] if train_losses else float("nan"),
         "train_loss_curve": train_losses,
         "eval_loss": eval_metrics["eval_loss"],
         "perplexity": eval_metrics["perplexity"],
         "wall_time_s": train_time,
         "tokens_per_second": total_tokens / train_time if train_time > 0 else 0.0,
+        "avg_optimizer_step_latency_s": optimizer_step_latency_mean,
+        "avg_generation_latency_s": generation_latency_mean,
+        "avg_generation_tokens_per_second": generation_tps_mean,
         "peak_vram_mb": (
             torch.cuda.max_memory_allocated(device) / (1024**2) if torch.cuda.is_available() else 0.0
         ),
-        "pre_sample": pre_text,
-        "post_sample": post_text,
+        "peak_reserved_vram_mb": (
+            torch.cuda.max_memory_reserved(device) / (1024**2) if torch.cuda.is_available() else 0.0
+        ),
+        "pre_samples": pre_samples,
+        "post_samples": post_samples,
+        "pre_sample": pre_samples[0]["response"] if pre_samples else "",
+        "post_sample": post_samples[0]["response"] if post_samples else "",
     }
 
     (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))

@@ -7,6 +7,8 @@ The main scratch implementations are:
 - `NF4` blockwise 4-bit quantization for frozen backbone linear weights
 - `FP16` LoRA adapters trained on top of the quantized backbone
 - a simple `PagedAdamW32bit` optimizer that keeps optimizer state on CPU and updates parameters page by page
+- pre/post fine-tuning instruction-following samples for qualitative comparison
+- analysis of VRAM, throughput, and latency from the scratch training run
 
 The goal is not to reproduce every low-level optimization from `bitsandbytes`, but to make the mechanics readable and runnable in a Google Colab A100 environment.
 
@@ -25,6 +27,61 @@ The goal is not to reproduce every low-level optimization from `bitsandbytes`, b
    - `notebooks/01_data_preparation.ipynb`
    - `notebooks/02_scratch_qlora_experiments.ipynb`
    - `notebooks/03_analysis.ipynb`
+
+## Run In Colab
+
+1. Open [Google Colab](https://colab.research.google.com/).
+2. Create a new notebook.
+3. In `Runtime -> Change runtime type`, select:
+   - `T4 GPU` for lighter smoke tests, or
+   - `A100 GPU` for the main experiments.
+4. In the first cell, clone the repo:
+
+```python
+!git clone https://github.com/khanzaifa37/Quantized-LoRA.git /content/qLoRA
+```
+
+5. Change into the repo:
+
+```python
+%cd /content/qLoRA
+```
+
+6. Open the notebook you want from the Colab file browser:
+   - `/content/qLoRA/notebooks/01_data_preparation.ipynb`
+   - `/content/qLoRA/notebooks/02_scratch_qlora_experiments.ipynb`
+   - `/content/qLoRA/notebooks/03_analysis.ipynb`
+
+7. Run the notebooks in order:
+   - `01_data_preparation.ipynb`: downloads and formats `OpenAssistant/oasst1`
+   - `02_scratch_qlora_experiments.ipynb`: runs the scratch NF4 + FP16 LoRA + paged optimizer experiment and captures instruction-tuning generations before/after training
+   - `03_analysis.ipynb`: loads `results/scratch_qlora/metrics.json`, summarizes VRAM/throughput/latency, and compares instruction-following outputs
+
+8. If you want to rerun with different settings, edit the `ExperimentConfig` cell in `02_scratch_qlora_experiments.ipynb`. The most useful values to change first are:
+   - `model_name`
+   - `max_train_samples`
+   - `epochs`
+   - `lora_rank`
+   - `quant_block_size`
+   - `optimizer_page_size`
+
+9. Your outputs will be written inside the cloned repo:
+   - data cache: `/content/qLoRA/data`
+   - experiment outputs: `/content/qLoRA/results/scratch_qlora`
+
+10. If you want to save outputs permanently, either:
+   - copy the `results/` folder to Google Drive, or
+   - commit the result artifacts to a separate branch if they are small enough.
+
+### Minimal Colab Bootstrap
+
+If you want a single setup cell before opening the notebooks, use:
+
+```python
+!git clone https://github.com/khanzaifa37/Quantized-LoRA.git /content/qLoRA
+%cd /content/qLoRA
+!python scripts/make_notebooks.py
+```
 
 ## Default Experiment Choices
 
