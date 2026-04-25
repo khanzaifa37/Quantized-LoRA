@@ -58,12 +58,15 @@ def write_notebook(path: Path, cells: list[dict]) -> None:
     path.write_text(json.dumps(notebook, indent=2))
 
 
-def build_data_prep() -> list[dict]:
+def build_end_to_end() -> list[dict]:
     return [
-        md_cell("# 01 Data Preparation\n\nPrepare OpenAssistant instruction-response pairs and cache them locally."),
+        md_cell(
+            "# Scratch QLoRA End To End\n\nRun the full scratch QLoRA workflow in one notebook: setup, data preparation, training, and analysis."
+        ),
         code_cell(
             """from pathlib import Path
 import sys
+import torch
 
 PROJECT_ROOT = Path("/content/qLoRA").resolve()
 if not PROJECT_ROOT.exists():
@@ -72,10 +75,18 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 DATA_DIR = PROJECT_ROOT / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-print(PROJECT_ROOT)
+RESULTS_DIR = PROJECT_ROOT / "results" / "scratch_qlora"
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+print("Project root:", PROJECT_ROOT)
+print("Torch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0))
 """
         ),
         code_cell(INSTALL_CELL),
+        md_cell("## 1. Prepare Dataset"),
         code_cell(
             """from qlora_scratch.data import build_oasst1_splits
 
@@ -90,31 +101,7 @@ from pathlib import Path
 print(json.loads((DATA_DIR / "metadata.json").read_text()))
 """
         ),
-    ]
-
-
-def build_experiments() -> list[dict]:
-    return [
-        md_cell(
-            "# 02 Scratch QLoRA Experiments\n\nRun a readable from-scratch QLoRA experiment with NF4 quantization, FP16 LoRA adapters, and a paged optimizer."
-        ),
-        code_cell(
-            """from pathlib import Path
-import sys
-import torch
-
-PROJECT_ROOT = Path("/content/qLoRA").resolve()
-if not PROJECT_ROOT.exists():
-    PROJECT_ROOT = Path.cwd().resolve().parent if Path.cwd().name == "notebooks" else Path.cwd().resolve()
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-
-print("Torch:", torch.__version__)
-print("CUDA:", torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU:", torch.cuda.get_device_name(0))
-"""
-        ),
-        code_cell(INSTALL_CELL),
+        md_cell("## 2. Configure Experiment"),
         code_cell(
             """from qlora_scratch.train import ExperimentConfig
 
@@ -132,7 +119,7 @@ config = ExperimentConfig(
     lora_alpha=16,
     quant_block_size=64,
     optimizer_page_size=2**18,
-    output_dir=str(PROJECT_ROOT / "results" / "scratch_qlora"),
+    output_dir=str(RESULTS_DIR),
 )
 config
 """
@@ -146,6 +133,7 @@ config
 sample_prompts
 """
         ),
+        md_cell("## 3. Run Scratch QLoRA Training"),
         code_cell(
             """from qlora_scratch.train import run_experiment
 
@@ -171,33 +159,15 @@ print("Tokens/sec:", metrics["tokens_per_second"])
     print("\\n")
 """
         ),
-    ]
-
-
-def build_analysis() -> list[dict]:
-    return [
-        md_cell("# 03 Analysis\n\nInspect metrics, visualize the training curve, and compare generated samples."),
-        code_cell(
-            """from pathlib import Path
-import sys
-
-PROJECT_ROOT = Path("/content/qLoRA").resolve()
-if not PROJECT_ROOT.exists():
-    PROJECT_ROOT = Path.cwd().resolve().parent if Path.cwd().name == "notebooks" else Path.cwd().resolve()
-sys.path.insert(0, str(PROJECT_ROOT / "src"))
-"""
-        ),
-        code_cell(INSTALL_CELL),
+        md_cell("## 4. Analyze Results"),
         code_cell(
             """from qlora_scratch.analysis import (
     build_instruction_tuning_table,
-    load_metrics,
     metrics_to_frame,
     plot_system_metrics,
     plot_training_curve,
 )
 
-metrics = load_metrics(PROJECT_ROOT / "results" / "scratch_qlora")
 summary = metrics_to_frame(metrics)
 summary
 """
@@ -234,9 +204,15 @@ instruction_table
 
 
 def main() -> None:
-    write_notebook(NOTEBOOKS / "01_data_preparation.ipynb", build_data_prep())
-    write_notebook(NOTEBOOKS / "02_scratch_qlora_experiments.ipynb", build_experiments())
-    write_notebook(NOTEBOOKS / "03_analysis.ipynb", build_analysis())
+    for old_name in [
+        "01_data_preparation.ipynb",
+        "02_scratch_qlora_experiments.ipynb",
+        "03_analysis.ipynb",
+    ]:
+        old_path = NOTEBOOKS / old_name
+        if old_path.exists():
+            old_path.unlink()
+    write_notebook(NOTEBOOKS / "01_end_to_end_qlora_workflow.ipynb", build_end_to_end())
 
 
 if __name__ == "__main__":

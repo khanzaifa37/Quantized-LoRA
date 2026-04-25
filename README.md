@@ -24,9 +24,7 @@ The goal is not to reproduce every low-level optimization from `bitsandbytes`, b
 1. Create a new Colab notebook session with GPU enabled.
 2. Clone this repo into `/content`.
 3. Open and run:
-   - `notebooks/01_data_preparation.ipynb`
-   - `notebooks/02_scratch_qlora_experiments.ipynb`
-   - `notebooks/03_analysis.ipynb`
+   - `notebooks/01_end_to_end_qlora_workflow.ipynb`
 
 ## Run In Colab
 
@@ -47,17 +45,16 @@ The goal is not to reproduce every low-level optimization from `bitsandbytes`, b
 %cd /content/qLoRA
 ```
 
-6. Open the notebook you want from the Colab file browser:
-   - `/content/qLoRA/notebooks/01_data_preparation.ipynb`
-   - `/content/qLoRA/notebooks/02_scratch_qlora_experiments.ipynb`
-   - `/content/qLoRA/notebooks/03_analysis.ipynb`
+6. Open the notebook from the Colab file browser:
+   - `/content/qLoRA/notebooks/01_end_to_end_qlora_workflow.ipynb`
 
-7. Run the notebooks in order:
-   - `01_data_preparation.ipynb`: downloads and formats `OpenAssistant/oasst1`
-   - `02_scratch_qlora_experiments.ipynb`: runs the scratch NF4 + FP16 LoRA + paged optimizer experiment and captures instruction-tuning generations before/after training
-   - `03_analysis.ipynb`: loads `results/scratch_qlora/metrics.json`, summarizes VRAM/throughput/latency, and compares instruction-following outputs
+7. Run the notebook from top to bottom:
+   - prepares the `OpenAssistant/oasst1` dataset
+   - runs the scratch NF4 + FP16 LoRA + paged optimizer experiment
+   - captures instruction-tuning generations before and after fine-tuning
+   - summarizes VRAM, throughput, latency, and qualitative outputs
 
-8. If you want to rerun with different settings, edit the `ExperimentConfig` cell in `02_scratch_qlora_experiments.ipynb`. The most useful values to change first are:
+8. If you want to rerun with different settings, edit the `ExperimentConfig` cell in `01_end_to_end_qlora_workflow.ipynb`. The most useful values to change first are:
    - `model_name`
    - `max_train_samples`
    - `epochs`
