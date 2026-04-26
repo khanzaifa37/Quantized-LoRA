@@ -84,6 +84,50 @@ class QuantizedLoRALinear(nn.Module):
         return result + adapter_output.to(result.dtype) * self.config.scaling
 
 
+class LoRALinear(nn.Module):
+    def __init__(self, base_linear: nn.Linear, config: LoRAConfig):
+        super().__init__()
+        self.in_features = base_linear.in_features
+        self.out_features = base_linear.out_features
+        self.config = config
+
+        self.register_buffer(
+            "base_weight",
+            base_linear.weight.detach().to(config.adapter_dtype),
+            persistent=True,
+        )
+
+        if base_linear.bias is None:
+            self.register_parameter("bias", None)
+        else:
+            bias = nn.Parameter(base_linear.bias.detach().to(config.adapter_dtype), requires_grad=False)
+            self.register_parameter("bias", bias)
+
+        self.lora_dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
+        self.lora_A = nn.Parameter(
+            torch.empty(config.rank, self.in_features, dtype=config.adapter_dtype)
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(self.out_features, config.rank, dtype=config.adapter_dtype)
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        result = torch.nn.functional.linear(
+            x,
+            self.base_weight.to(dtype=x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float16),
+            self.bias,
+        )
+        adapter_input = self.lora_dropout(x).to(self.lora_A.dtype)
+        adapter_hidden = torch.nn.functional.linear(adapter_input, self.lora_A)
+        adapter_output = torch.nn.functional.linear(adapter_hidden, self.lora_B)
+        return result + adapter_output.to(result.dtype) * self.config.scaling
+
+
 def _iter_named_linears(model: nn.Module) -> Iterable[tuple[str, nn.Linear]]:
     for name, module in model.named_modules():
         if isinstance(module, nn.Linear):
@@ -98,7 +142,7 @@ def _get_parent_module(model: nn.Module, module_name: str) -> tuple[nn.Module, s
     return parent, parts[-1]
 
 
-def prepare_model_for_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
+def _prepare_model(model: nn.Module, config: LoRAConfig, adapter_cls: type[nn.Module]) -> nn.Module:
     for param in model.parameters():
         param.requires_grad = False
 
@@ -113,7 +157,7 @@ def prepare_model_for_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.
             continue
 
         parent, attr_name = _get_parent_module(model, name)
-        setattr(parent, attr_name, QuantizedLoRALinear(linear, config))
+        setattr(parent, attr_name, adapter_cls(linear, config))
         replaced += 1
 
     if replaced == 0:
@@ -122,6 +166,14 @@ def prepare_model_for_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.
         )
 
     return model
+
+
+def prepare_model_for_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
+    return _prepare_model(model, config, QuantizedLoRALinear)
+
+
+def prepare_model_for_lora_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
+    return _prepare_model(model, config, LoRALinear)
 
 
 def count_trainable_parameters(model: nn.Module) -> tuple[int, int]:

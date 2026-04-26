@@ -23,8 +23,13 @@ The goal is not to reproduce every low-level optimization from `bitsandbytes`, b
 
 1. Create a new Colab notebook session with GPU enabled.
 2. Clone this repo into `/content`.
-3. Open and run:
-   - `notebooks/01_end_to_end_qlora_workflow.ipynb`
+3. Choose either workflow:
+   - modular notebooks:
+     - `notebooks/01_data_preparation.ipynb`
+     - `notebooks/02_run_experiments.ipynb`
+     - `notebooks/03_analysis.ipynb`
+   - single notebook:
+     - `notebooks/04_unified_workflow.ipynb`
 
 ## Run In Colab
 
@@ -45,16 +50,25 @@ The goal is not to reproduce every low-level optimization from `bitsandbytes`, b
 %cd /content/qLoRA
 ```
 
-6. Open the notebook from the Colab file browser:
-   - `/content/qLoRA/notebooks/01_end_to_end_qlora_workflow.ipynb`
+6. Open the notebook(s) from the Colab file browser:
+   - modular flow:
+     - `/content/qLoRA/notebooks/01_data_preparation.ipynb`
+     - `/content/qLoRA/notebooks/02_run_experiments.ipynb`
+     - `/content/qLoRA/notebooks/03_analysis.ipynb`
+   - unified flow:
+     - `/content/qLoRA/notebooks/04_unified_workflow.ipynb`
 
-7. Run the notebook from top to bottom:
-   - prepares the `OpenAssistant/oasst1` dataset
-   - runs the scratch NF4 + FP16 LoRA + paged optimizer experiment
-   - captures instruction-tuning generations before and after fine-tuning
-   - summarizes VRAM, throughput, latency, and qualitative outputs
+7. Run either:
+   - the three modular notebooks in order, or
+   - the unified notebook from top to bottom
 
-8. If you want to rerun with different settings, edit the `ExperimentConfig` cell in `01_end_to_end_qlora_workflow.ipynb`. The most useful values to change first are:
+8. Both flows will:
+   - prepare the `OpenAssistant/oasst1` dataset
+   - run paired scratch LoRA and scratch QLoRA experiments
+   - capture instruction-tuning generations before and after fine-tuning
+   - summarize VRAM, throughput, latency, and qualitative outputs
+
+9. If you want to rerun with different settings, edit the `ExperimentConfig` cell in `02_run_experiments.ipynb` or `04_unified_workflow.ipynb`. The most useful values to change first are:
    - `model_name`
    - `max_train_samples`
    - `epochs`
@@ -62,11 +76,11 @@ The goal is not to reproduce every low-level optimization from `bitsandbytes`, b
    - `quant_block_size`
    - `optimizer_page_size`
 
-9. Your outputs will be written inside the cloned repo:
+10. Your outputs will be written inside the cloned repo:
    - data cache: `/content/qLoRA/data`
-   - experiment outputs: `/content/qLoRA/results/scratch_qlora`
+   - experiment outputs: `/content/qLoRA/results`
 
-10. If you want to save outputs permanently, either:
+11. If you want to save outputs permanently, either:
    - copy the `results/` folder to Google Drive, or
    - commit the result artifacts to a separate branch if they are small enough.
 

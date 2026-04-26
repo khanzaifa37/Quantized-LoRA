@@ -13,7 +13,12 @@ from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, default_data_collator
 
 from .data import load_json_splits
-from .lora import LoRAConfig, count_trainable_parameters, prepare_model_for_kbit_training
+from .lora import (
+    LoRAConfig,
+    count_trainable_parameters,
+    prepare_model_for_kbit_training,
+    prepare_model_for_lora_training,
+)
 from .paged_optim import PagedAdamW32bit
 
 DEFAULT_INSTRUCTION_PROMPTS = [
@@ -25,6 +30,7 @@ DEFAULT_INSTRUCTION_PROMPTS = [
 
 @dataclass
 class ExperimentConfig:
+    method: str = "qlora"
     model_name: str = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
     max_seq_length: int = 256
     train_batch_size: int = 2
@@ -164,7 +170,12 @@ def run_experiment(
         dropout=config.lora_dropout,
         block_size=config.quant_block_size,
     )
-    model = prepare_model_for_kbit_training(model, lora_config)
+    if config.method == "qlora":
+        model = prepare_model_for_kbit_training(model, lora_config)
+    elif config.method == "lora":
+        model = prepare_model_for_lora_training(model, lora_config)
+    else:
+        raise ValueError(f"Unsupported method: {config.method}")
     device = torch.device(config.device)
     model.to(device)
 
@@ -247,6 +258,7 @@ def run_experiment(
 
     metrics = {
         "config": asdict(config),
+        "method": config.method,
         "system": {
             "device": str(device),
             "cuda_available": torch.cuda.is_available(),
