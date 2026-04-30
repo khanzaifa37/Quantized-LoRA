@@ -412,6 +412,222 @@ def build_unified_workflow() -> list[dict]:
     return cells
 
 
+def build_chunked_workflow() -> list[dict]:
+    cells: list[dict] = [
+        md_cell(
+            "# 05 — Chunked QLoRA Workflow\n\n"
+            "This notebook mirrors `04_unified_workflow.ipynb` but adds a third method, "
+            "`qlora_chunked`, which streams the NF4 base-weight matmul one row-chunk at a time "
+            "via a custom autograd Function. The full fp16 weight is never materialized in "
+            "forward and is not retained for backward, so peak VRAM should drop below plain LoRA "
+            "instead of exceeding it.\n\n"
+            "We re-run `lora`, `qlora`, and `qlora_chunked` on the same OASST1 splits and "
+            "compare the three on VRAM, throughput, training time, and eval loss."
+        ),
+        code_cell(project_setup_cell()),
+        code_cell(GIT_PULL_CELL),
+        code_cell(INSTALL_CELL),
+        md_cell("## 1. Prepare Dataset"),
+    ]
+    cells.extend(build_data_prep()[4:])
+
+    cells.append(md_cell("## 2. Sanity-check Chunked Forward"))
+    cells.append(
+        code_cell(
+            """import torch
+from qlora_scratch.lora import LoRAConfig, ChunkedQuantizedLoRALinear, QuantizedLoRALinear
+
+torch.manual_seed(0)
+ref_linear = torch.nn.Linear(256, 384, bias=True).half()
+cfg = LoRAConfig(rank=4, alpha=8, dropout=0.0, block_size=64, chunk_size=64)
+
+dense_qlora = QuantizedLoRALinear(ref_linear, cfg)
+chunked_qlora = ChunkedQuantizedLoRALinear(ref_linear, cfg)
+chunked_qlora.load_state_dict(dense_qlora.state_dict())
+
+x = torch.randn(2, 16, 256, dtype=torch.float16)
+with torch.no_grad():
+    y_dense = dense_qlora(x)
+    y_chunk = chunked_qlora(x)
+
+max_abs_err = (y_dense - y_chunk).abs().max().item()
+print(f"Max |dense - chunked| forward error: {max_abs_err:.3e}")
+assert max_abs_err < 5e-3, "Chunked forward diverges from dense forward"
+print("Chunked forward matches dense forward (within fp16 tolerance).")
+"""
+        )
+    )
+
+    cells.append(md_cell("## 3. Run LoRA / QLoRA / Chunked-QLoRA"))
+    cells.append(
+        code_cell(
+            """from qlora_scratch.train import ExperimentConfig
+
+sample_prompts = [
+    "### Instruction:\\nSummarize QLoRA in plain language for a student.\\n\\n### Response:\\n",
+    "### Instruction:\\nWhat is the purpose of NF4 quantization in QLoRA?\\n\\n### Response:\\n",
+    "### Instruction:\\nExplain why streaming the weight matmul in chunks reduces VRAM.\\n\\n### Response:\\n",
+]
+
+base_kwargs = dict(
+    model_name="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    lora_rank=8,
+    lora_alpha=16,
+    quant_block_size=64,
+    max_train_samples=512,
+    max_eval_samples=128,
+)
+
+experiments = {
+    "scratch_lora_r8": ExperimentConfig(
+        method="lora",
+        output_dir=str(RESULTS_DIR / "chunked_run" / "scratch_lora_r8"),
+        **base_kwargs,
+    ),
+    "scratch_qlora_r8": ExperimentConfig(
+        method="qlora",
+        output_dir=str(RESULTS_DIR / "chunked_run" / "scratch_qlora_r8"),
+        **base_kwargs,
+    ),
+    "scratch_qlora_chunked_r8": ExperimentConfig(
+        method="qlora_chunked",
+        quant_chunk_size=128,
+        output_dir=str(RESULTS_DIR / "chunked_run" / "scratch_qlora_chunked_r8"),
+        **base_kwargs,
+    ),
+}
+
+print("Experiments to run:")
+for name, cfg in experiments.items():
+    print(name, "method=", cfg.method, "rank=", cfg.lora_rank, "output=", cfg.output_dir)
+"""
+        )
+    )
+    cells.append(
+        code_cell(
+            """import gc
+import json
+from pathlib import Path
+import torch
+from qlora_scratch.train import run_experiment
+
+all_metrics = []
+
+for exp_name, config in experiments.items():
+    print("\\n" + "#" * 70)
+    print(f"Running {exp_name} (method={config.method})")
+    print("#" * 70)
+    metrics = run_experiment(PROJECT_ROOT / "data", config, sample_prompts=sample_prompts)
+    metrics["experiment"] = exp_name
+    Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+    (Path(config.output_dir) / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    all_metrics.append(metrics)
+    print(
+        f"Done: {exp_name} | eval_loss={metrics['eval_loss']:.4f} "
+        f"| peak_vram_mb={metrics['peak_vram_mb']:.1f} "
+        f"| tokens/s={metrics['tokens_per_second']:.1f}"
+    )
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+len(all_metrics)
+"""
+        )
+    )
+
+    cells.append(md_cell("## 4. Three-Way Summary Table"))
+    cells.append(
+        code_cell(
+            """from qlora_scratch.analysis import results_summary_table
+
+summary = results_summary_table(all_metrics)
+display_cols = [
+    "experiment",
+    "method",
+    "lora_rank",
+    "eval_loss",
+    "perplexity",
+    "peak_vram_mb",
+    "peak_reserved_vram_mb",
+    "tokens_per_second",
+    "wall_time_s",
+]
+summary[display_cols]
+"""
+        )
+    )
+
+    cells.append(md_cell("## 5. VRAM, Throughput, Training Time"))
+    cells.append(
+        code_cell(
+            """from qlora_scratch.analysis import (
+    plot_throughput_comparison,
+    plot_training_time_comparison,
+    plot_vram_comparison,
+)
+
+plot_vram_comparison(summary)
+"""
+        )
+    )
+    cells.append(code_cell("plot_throughput_comparison(summary)\n"))
+    cells.append(code_cell("plot_training_time_comparison(summary)\n"))
+
+    cells.append(md_cell("## 6. Training Loss Curves"))
+    cells.append(
+        code_cell(
+            """from qlora_scratch.analysis import plot_training_loss
+
+plot_training_loss(all_metrics, title="LoRA vs QLoRA vs Chunked QLoRA")
+"""
+        )
+    )
+
+    cells.append(md_cell("## 7. Peak VRAM Deltas (Expect Chunked < LoRA < QLoRA)"))
+    cells.append(
+        code_cell(
+            """import pandas as pd
+
+vram_pivot = summary.set_index("method")[["peak_vram_mb", "peak_reserved_vram_mb"]]
+vram_pivot["vs_lora_pct"] = (
+    (vram_pivot["peak_vram_mb"] - vram_pivot.loc["lora", "peak_vram_mb"])
+    / vram_pivot.loc["lora", "peak_vram_mb"]
+    * 100.0
+)
+vram_pivot.round(2)
+"""
+        )
+    )
+
+    cells.append(md_cell("## 8. Pre/Post Instruction-Tuning Samples (Chunked QLoRA Run)"))
+    cells.append(
+        code_cell(
+            """from qlora_scratch.analysis import build_instruction_tuning_table
+
+chunked_metrics = next(m for m in all_metrics if m["method"] == "qlora_chunked")
+instruction_table = build_instruction_tuning_table(chunked_metrics)
+instruction_table
+"""
+        )
+    )
+    cells.append(
+        code_cell(
+            """for row in instruction_table.to_dict(orient="records"):
+    print(f"=== PROMPT {row['prompt_id']} ===")
+    print(row["prompt"])
+    print("\\n--- PRE-FINETUNE ---")
+    print(row["pre_response"])
+    print("\\n--- POST-FINETUNE ---")
+    print(row["post_response"])
+    print("\\n")
+"""
+        )
+    )
+
+    return cells
+
+
 def main() -> None:
     old_path = NOTEBOOKS / "01_end_to_end_qlora_workflow.ipynb"
     if old_path.exists():
@@ -420,6 +636,7 @@ def main() -> None:
     write_notebook(NOTEBOOKS / "02_run_experiments.ipynb", build_experiments())
     write_notebook(NOTEBOOKS / "03_analysis.ipynb", build_analysis())
     write_notebook(NOTEBOOKS / "04_unified_workflow.ipynb", build_unified_workflow())
+    write_notebook(NOTEBOOKS / "05_chunked_qlora_workflow.ipynb", build_chunked_workflow())
 
 
 if __name__ == "__main__":

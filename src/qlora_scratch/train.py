@@ -16,6 +16,7 @@ from .data import load_json_splits
 from .lora import (
     LoRAConfig,
     count_trainable_parameters,
+    prepare_model_for_chunked_kbit_training,
     prepare_model_for_kbit_training,
     prepare_model_for_lora_training,
 )
@@ -45,6 +46,7 @@ class ExperimentConfig:
     lora_alpha: int = 16
     lora_dropout: float = 0.05
     quant_block_size: int = 64
+    quant_chunk_size: int = 128
     optimizer_page_size: int = 2**18
     seed: int = 42
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -169,9 +171,12 @@ def run_experiment(
         alpha=config.lora_alpha,
         dropout=config.lora_dropout,
         block_size=config.quant_block_size,
+        chunk_size=config.quant_chunk_size,
     )
     if config.method == "qlora":
         model = prepare_model_for_kbit_training(model, lora_config)
+    elif config.method == "qlora_chunked":
+        model = prepare_model_for_chunked_kbit_training(model, lora_config)
     elif config.method == "lora":
         model = prepare_model_for_lora_training(model, lora_config)
     else:

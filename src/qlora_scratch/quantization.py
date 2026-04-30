@@ -76,6 +76,137 @@ def _pad_to_block_size(flat_weight: torch.Tensor, block_size: int) -> torch.Tens
     return torch.nn.functional.pad(flat_weight, (0, padding))
 
 
+def _dequantize_row_chunk(
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    in_features: int,
+    block_size: int,
+    row_start: int,
+    row_end: int,
+    compute_dtype: torch.dtype,
+) -> torch.Tensor:
+    blocks_per_row = in_features // block_size
+    block_start = row_start * blocks_per_row
+    block_end = row_end * blocks_per_row
+
+    chunk_codes = codes[block_start:block_end]
+    chunk_scales = scales[block_start:block_end].to(compute_dtype)
+    codebook = NF4_CODEBOOK.to(device=codes.device, dtype=compute_dtype)
+    chunk_values = codebook[chunk_codes.long()]
+    chunk_weight = chunk_values * chunk_scales.unsqueeze(-1)
+    return chunk_weight.reshape(row_end - row_start, in_features)
+
+
+class _ChunkedNF4MatMul(torch.autograd.Function):
+    """
+    Streaming x @ W.T where W is stored as NF4 codes + per-block scales.
+
+    Forward and backward both rebuild W one row-chunk at a time, so the full
+    fp16 weight never lives in memory and is not retained in the autograd graph.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x: torch.Tensor,
+        codes: torch.Tensor,
+        scales: torch.Tensor,
+        out_features: int,
+        in_features: int,
+        block_size: int,
+        chunk_size: int,
+    ) -> torch.Tensor:
+        ctx.save_for_backward(x, codes, scales)
+        ctx.out_features = out_features
+        ctx.in_features = in_features
+        ctx.block_size = block_size
+        ctx.chunk_size = chunk_size
+
+        compute_dtype = (
+            x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float16
+        )
+        out_shape = x.shape[:-1] + (out_features,)
+        out = torch.empty(out_shape, dtype=x.dtype, device=x.device)
+        x_compute = x.to(compute_dtype)
+
+        for row_start in range(0, out_features, chunk_size):
+            row_end = min(row_start + chunk_size, out_features)
+            chunk_weight = _dequantize_row_chunk(
+                codes,
+                scales,
+                in_features=in_features,
+                block_size=block_size,
+                row_start=row_start,
+                row_end=row_end,
+                compute_dtype=compute_dtype,
+            )
+            out[..., row_start:row_end] = torch.nn.functional.linear(x_compute, chunk_weight).to(x.dtype)
+            del chunk_weight
+
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        x, codes, scales = ctx.saved_tensors
+        out_features = ctx.out_features
+        in_features = ctx.in_features
+        block_size = ctx.block_size
+        chunk_size = ctx.chunk_size
+
+        compute_dtype = (
+            x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float16
+        )
+        grad_x = torch.zeros_like(x, dtype=compute_dtype)
+        grad_output_compute = grad_output.to(compute_dtype)
+
+        for row_start in range(0, out_features, chunk_size):
+            row_end = min(row_start + chunk_size, out_features)
+            chunk_weight = _dequantize_row_chunk(
+                codes,
+                scales,
+                in_features=in_features,
+                block_size=block_size,
+                row_start=row_start,
+                row_end=row_end,
+                compute_dtype=compute_dtype,
+            )
+            grad_chunk = grad_output_compute[..., row_start:row_end]
+            grad_x.add_(grad_chunk @ chunk_weight)
+            del chunk_weight
+
+        return grad_x.to(x.dtype), None, None, None, None, None, None
+
+
+def chunked_nf4_linear(
+    x: torch.Tensor,
+    codes: torch.Tensor,
+    scales: torch.Tensor,
+    original_shape: Tuple[int, ...],
+    bias: torch.Tensor | None,
+    *,
+    block_size: int = 64,
+    chunk_size: int = 128,
+) -> torch.Tensor:
+    out_features, in_features = original_shape
+
+    if in_features % block_size != 0:
+        weight = dequantize_nf4(
+            codes,
+            scales,
+            original_shape,
+            block_size=block_size,
+            dtype=x.dtype if x.dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float16,
+        )
+        out = torch.nn.functional.linear(x, weight, bias)
+        return out
+
+    out = _ChunkedNF4MatMul.apply(x, codes, scales, out_features, in_features, block_size, chunk_size)
+    if bias is not None:
+        out = out + bias.to(out.dtype)
+    return out
+
+
 def quantize_nf4(weight: torch.Tensor, block_size: int = 64) -> NF4Tensor:
     if weight.ndim < 2:
         raise ValueError("NF4 quantization expects at least a matrix-shaped tensor.")
