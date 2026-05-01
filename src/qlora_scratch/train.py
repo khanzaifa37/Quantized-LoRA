@@ -16,6 +16,7 @@ from .data import load_json_splits
 from .lora import (
     LoRAConfig,
     count_trainable_parameters,
+    prepare_model_for_autotuned_triton_kbit_training,
     prepare_model_for_chunked_kbit_training,
     prepare_model_for_kbit_training,
     prepare_model_for_lora_training,
@@ -180,6 +181,8 @@ def run_experiment(
         model = prepare_model_for_chunked_kbit_training(model, lora_config)
     elif config.method == "qlora_triton":
         model = prepare_model_for_triton_kbit_training(model, lora_config)
+    elif config.method == "qlora_triton_autotuned":
+        model = prepare_model_for_autotuned_triton_kbit_training(model, lora_config)
     elif config.method == "lora":
         model = prepare_model_for_lora_training(model, lora_config)
     else:

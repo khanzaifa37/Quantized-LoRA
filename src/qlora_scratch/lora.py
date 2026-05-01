@@ -8,7 +8,11 @@ import torch
 import torch.nn as nn
 
 from .quantization import chunked_nf4_linear, dequantize_nf4, quantize_nf4
-from .triton_kernels import TRITON_AVAILABLE, triton_nf4_linear
+from .triton_kernels import (
+    TRITON_AVAILABLE,
+    autotuned_triton_nf4_linear,
+    triton_nf4_linear,
+)
 
 
 @dataclass
@@ -211,6 +215,75 @@ class TritonQuantizedLoRALinear(nn.Module):
         return result + adapter_output.to(result.dtype) * self.config.scaling
 
 
+class AutotunedTritonQuantizedLoRALinear(nn.Module):
+    """
+    QLoRA layer backed by autotuned Triton-fused NF4 dequant + matmul kernels.
+
+    Identical to ``TritonQuantizedLoRALinear`` but routes through
+    ``autotuned_triton_nf4_linear``, which lets Triton benchmark a small set of
+    tile shapes / num_warps / num_stages per (M, N, K) and cache the winner.
+
+    The first call for each new matmul shape pays a one-time tuning cost
+    (Triton runs each config a few times). After that, the cached config is
+    used and step time should drop noticeably below the static-tile Triton
+    layer, ideally approaching the cuBLAS-backed dense-dequant path on
+    throughput while keeping the chunked / Triton VRAM profile.
+    """
+
+    def __init__(self, base_linear: nn.Linear, config: LoRAConfig):
+        super().__init__()
+        self.in_features = base_linear.in_features
+        self.out_features = base_linear.out_features
+        self.config = config
+
+        quantized_weight = quantize_nf4(
+            base_linear.weight.data,
+            block_size=config.block_size,
+        )
+        self.register_buffer("qweight_codes", quantized_weight.codes, persistent=True)
+        self.register_buffer("qweight_scales", quantized_weight.scales, persistent=True)
+        self.original_shape = quantized_weight.original_shape
+
+        if base_linear.bias is None:
+            self.register_parameter("bias", None)
+        else:
+            bias = nn.Parameter(base_linear.bias.detach().to(config.adapter_dtype), requires_grad=False)
+            self.register_parameter("bias", bias)
+
+        self.lora_dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
+        self.lora_A = nn.Parameter(
+            torch.empty(config.rank, self.in_features, dtype=config.adapter_dtype)
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(self.out_features, config.rank, dtype=config.adapter_dtype)
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+    @property
+    def using_triton_kernel(self) -> bool:
+        return TRITON_AVAILABLE and self.qweight_codes.is_cuda
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        result = autotuned_triton_nf4_linear(
+            x,
+            self.qweight_codes,
+            self.qweight_scales,
+            self.original_shape,
+            self.bias,
+            block_size=self.config.block_size,
+            chunk_size=self.config.chunk_size,
+        )
+
+        adapter_input = self.lora_dropout(x).to(self.lora_A.dtype)
+        adapter_hidden = torch.nn.functional.linear(adapter_input, self.lora_A)
+        adapter_output = torch.nn.functional.linear(adapter_hidden, self.lora_B)
+        return result + adapter_output.to(result.dtype) * self.config.scaling
+
+
 class LoRALinear(nn.Module):
     def __init__(self, base_linear: nn.Linear, config: LoRAConfig):
         super().__init__()
@@ -305,6 +378,10 @@ def prepare_model_for_chunked_kbit_training(model: nn.Module, config: LoRAConfig
 
 def prepare_model_for_triton_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
     return _prepare_model(model, config, TritonQuantizedLoRALinear)
+
+
+def prepare_model_for_autotuned_triton_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
+    return _prepare_model(model, config, AutotunedTritonQuantizedLoRALinear)
 
 
 def prepare_model_for_lora_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
