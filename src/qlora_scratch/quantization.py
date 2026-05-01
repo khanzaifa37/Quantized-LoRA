@@ -76,7 +76,7 @@ def _pad_to_block_size(flat_weight: torch.Tensor, block_size: int) -> torch.Tens
     return torch.nn.functional.pad(flat_weight, (0, padding))
 
 
-def _dequantize_row_chunk(
+def dequantize_row_chunk(
     codes: torch.Tensor,
     scales: torch.Tensor,
     *,
@@ -132,7 +132,7 @@ class _ChunkedNF4MatMul(torch.autograd.Function):
 
         for row_start in range(0, out_features, chunk_size):
             row_end = min(row_start + chunk_size, out_features)
-            chunk_weight = _dequantize_row_chunk(
+            chunk_weight = dequantize_row_chunk(
                 codes,
                 scales,
                 in_features=in_features,
@@ -162,7 +162,7 @@ class _ChunkedNF4MatMul(torch.autograd.Function):
 
         for row_start in range(0, out_features, chunk_size):
             row_end = min(row_start + chunk_size, out_features)
-            chunk_weight = _dequantize_row_chunk(
+            chunk_weight = dequantize_row_chunk(
                 codes,
                 scales,
                 in_features=in_features,

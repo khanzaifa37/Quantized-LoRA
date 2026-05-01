@@ -19,6 +19,7 @@ from .lora import (
     prepare_model_for_chunked_kbit_training,
     prepare_model_for_kbit_training,
     prepare_model_for_lora_training,
+    prepare_model_for_triton_kbit_training,
 )
 from .paged_optim import PagedAdamW32bit
 
@@ -177,6 +178,8 @@ def run_experiment(
         model = prepare_model_for_kbit_training(model, lora_config)
     elif config.method == "qlora_chunked":
         model = prepare_model_for_chunked_kbit_training(model, lora_config)
+    elif config.method == "qlora_triton":
+        model = prepare_model_for_triton_kbit_training(model, lora_config)
     elif config.method == "lora":
         model = prepare_model_for_lora_training(model, lora_config)
     else:

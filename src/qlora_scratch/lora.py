@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from .quantization import chunked_nf4_linear, dequantize_nf4, quantize_nf4
+from .triton_kernels import TRITON_AVAILABLE, triton_nf4_linear
 
 
 @dataclass
@@ -142,6 +143,74 @@ class ChunkedQuantizedLoRALinear(nn.Module):
         return result + adapter_output.to(result.dtype) * self.config.scaling
 
 
+class TritonQuantizedLoRALinear(nn.Module):
+    """
+    QLoRA layer backed by Triton-fused NF4 dequant + matmul kernels.
+
+    Forward and backward both run through ``triton_nf4_linear``, which launches
+    a custom CUDA kernel that rebuilds the NF4 weight one tile at a time inside
+    the GPU's tensor cores. The fp16 weight is never materialized in HBM and
+    is never saved by autograd, so peak VRAM stays close to the NF4 footprint
+    while throughput stays close to a regular fp16 linear.
+
+    Falls back to the chunked Python path when Triton or CUDA is unavailable
+    (so the class can be instantiated and unit-tested on CPU).
+    """
+
+    def __init__(self, base_linear: nn.Linear, config: LoRAConfig):
+        super().__init__()
+        self.in_features = base_linear.in_features
+        self.out_features = base_linear.out_features
+        self.config = config
+
+        quantized_weight = quantize_nf4(
+            base_linear.weight.data,
+            block_size=config.block_size,
+        )
+        self.register_buffer("qweight_codes", quantized_weight.codes, persistent=True)
+        self.register_buffer("qweight_scales", quantized_weight.scales, persistent=True)
+        self.original_shape = quantized_weight.original_shape
+
+        if base_linear.bias is None:
+            self.register_parameter("bias", None)
+        else:
+            bias = nn.Parameter(base_linear.bias.detach().to(config.adapter_dtype), requires_grad=False)
+            self.register_parameter("bias", bias)
+
+        self.lora_dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
+        self.lora_A = nn.Parameter(
+            torch.empty(config.rank, self.in_features, dtype=config.adapter_dtype)
+        )
+        self.lora_B = nn.Parameter(
+            torch.zeros(self.out_features, config.rank, dtype=config.adapter_dtype)
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+
+    @property
+    def using_triton_kernel(self) -> bool:
+        return TRITON_AVAILABLE and self.qweight_codes.is_cuda
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        result = triton_nf4_linear(
+            x,
+            self.qweight_codes,
+            self.qweight_scales,
+            self.original_shape,
+            self.bias,
+            block_size=self.config.block_size,
+            chunk_size=self.config.chunk_size,
+        )
+
+        adapter_input = self.lora_dropout(x).to(self.lora_A.dtype)
+        adapter_hidden = torch.nn.functional.linear(adapter_input, self.lora_A)
+        adapter_output = torch.nn.functional.linear(adapter_hidden, self.lora_B)
+        return result + adapter_output.to(result.dtype) * self.config.scaling
+
+
 class LoRALinear(nn.Module):
     def __init__(self, base_linear: nn.Linear, config: LoRAConfig):
         super().__init__()
@@ -232,6 +301,10 @@ def prepare_model_for_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.
 
 def prepare_model_for_chunked_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
     return _prepare_model(model, config, ChunkedQuantizedLoRALinear)
+
+
+def prepare_model_for_triton_kbit_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
+    return _prepare_model(model, config, TritonQuantizedLoRALinear)
 
 
 def prepare_model_for_lora_training(model: nn.Module, config: LoRAConfig) -> nn.Module:
